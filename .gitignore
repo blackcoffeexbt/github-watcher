@@ -1,0 +1,14 @@
+node_modules/
+dist/
+dist-server/
+output/
+data/
+.env
+*.s9pk
+test-results/
+playwright-report/
+.DS_Store
+startos/node_modules/
+startos/javascript/
+startos/build/
+javascript/

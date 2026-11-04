@@ -1,0 +1,24 @@
+services:
+  mailbox:
+    build: .
+    ports:
+      - "127.0.0.1:3000:3000"
+    environment:
+      MAILBOX_PASSWORD: ${MAILBOX_PASSWORD:?Set MAILBOX_PASSWORD in .env}
+      SMTP_HOST: ${SMTP_HOST:-}
+      SMTP_PORT: ${SMTP_PORT:-587}
+      SMTP_FROM: ${SMTP_FROM:-}
+      SMTP_SECURITY: ${SMTP_SECURITY:-starttls}
+      SMTP_USER: ${SMTP_USER:-}
+      SMTP_PASSWORD: ${SMTP_PASSWORD:-}
+    volumes:
+      - mailbox-data:/data
+    restart: unless-stopped
+  mailpit:
+    image: axllent/mailpit:v1.27
+    profiles: [test-mail]
+    ports:
+      - "127.0.0.1:1025:1025"
+      - "127.0.0.1:8025:8025"
+volumes:
+  mailbox-data:

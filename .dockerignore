@@ -1,0 +1,9 @@
+node_modules
+dist
+data
+.env
+.git
+output
+tests
+startos-package
+*.s9pk

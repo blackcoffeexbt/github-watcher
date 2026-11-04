@@ -1,0 +1,5 @@
+export interface Subscription { id: number; full_name: string; github_id: number; category_id: number | null; stable: number; prerelease: number; email: number; nostr: number; initialized: number; last_checked: string | null; next_check: number; error: string | null }
+export interface GitHubRelease { id: number; name: string | null; tag_name: string; body: string | null; html_url: string; published_at: string; draft: boolean; prerelease: boolean; author: { login: string }; assets: { name: string; browser_download_url: string; size: number }[] }
+export interface Release { id: number; subscription_id: number; github_id: number; title: string; tag: string; body: string; url: string; published_at: string; author: string; prerelease: number; unread: number; assets: string; full_name?: string }
+export interface Settings { githubToken: string; emailEnabled: boolean; emailRecipient: string; nostrEnabled: boolean; nostrRecipient: string; discoveryRelays: string[] }
+export const defaults: Settings = { githubToken: '', emailEnabled: false, emailRecipient: '', nostrEnabled: false, nostrRecipient: '', discoveryRelays: ['wss://relay.damus.io', 'wss://nos.lol'] };
