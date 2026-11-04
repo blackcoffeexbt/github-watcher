@@ -192,6 +192,13 @@ describe('HTTP authentication and mailbox actions', () => {
     expect(db.prepare('SELECT category_id FROM subscriptions').get()).toEqual({ category_id: null });
     expect(db.prepare('SELECT count(*) n FROM releases').get()).toEqual({ n: 1 });
     expect((await fetch(`${base}/api/read-all`, { method: 'POST', headers: { ...headers, Origin: 'https://evil.test' }, body: '{}' })).status).toBe(403);
+    db.prepare("INSERT INTO subscriptions(id,github_id,full_name) VALUES(2,2,'other/project')").run();
+    ingest(db, db.prepare('SELECT * FROM subscriptions WHERE id=2').get() as Subscription, [release(2)]);
+    db.prepare('UPDATE releases SET unread=1').run();
+    await fetch(`${base}/api/read-all`, { method: 'POST', headers, body: JSON.stringify({ subscriptionId: 1 }) });
+    expect(db.prepare('SELECT subscription_id,unread FROM releases ORDER BY subscription_id').all()).toEqual([{ subscription_id: 1, unread: 0 }, { subscription_id: 2, unread: 1 }]);
+    await fetch(`${base}/api/read-all`, { method: 'POST', headers, body: JSON.stringify({ subscriptionId: 0 }) });
+    expect(db.prepare('SELECT COUNT(*) n FROM releases WHERE unread=1').get()).toEqual({ n: 0 });
     setMeta(db, 'settings', JSON.stringify({ ...settings(db), githubToken: 'secret-test-token' })); const config = await (await fetch(`${base}/api/settings`, { headers })).json(); expect(config.githubToken).toBe(''); expect(JSON.stringify(config)).not.toContain('secret-test-token'); expect(config.senderNpub).toMatch(/^npub1/);
     setMeta(db, 'github_pause', String(Date.now() + 100000));
     await fetch(`${base}/api/settings`, { method: 'PUT', headers, body: JSON.stringify({ ...config, clearGithubToken: true }) });
