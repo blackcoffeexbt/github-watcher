@@ -6,7 +6,7 @@
 
 The newest matching release appears as New; earlier releases appear as Old. Opening a release marks it read. Use categories to group your projects and Search to find a release. Choose Light, Dark, or System appearance in Settings.
 
-Checks run every three hours even while your browser is closed. The refresh button checks immediately. An optional GitHub token in Settings can help when following many repositories.
+Choose Check every (1–24 hours), Starting at, and Timezone in Settings. The default is every 3 hours from 00:00 in Europe/London. Settings shows the next check. The schedule resets at the chosen start time each day and continues while your browser is closed. After downtime, one catch-up check runs. The refresh button checks immediately without changing the schedule. An optional GitHub token in Settings can help when following many repositories.
 
 ## Email notifications
 

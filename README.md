@@ -1,6 +1,6 @@
 # Release Mailbox
 
-A self-hosted mailbox for public GitHub releases. React, TypeScript, Tailwind, Node 22, and SQLite. Follow repositories in categories, browse New/Old history, and receive email or encrypted Nostr DMs. The backend polls every three hours whether or not the browser is open.
+A self-hosted mailbox for public GitHub releases. React, TypeScript, Tailwind, Node 22, and SQLite. Follow repositories in categories, browse New/Old history, and receive email or encrypted Nostr DMs. The backend checks on the shared schedule configured in Settings, whether or not the browser is open.
 
 ## Run locally
 
@@ -99,11 +99,17 @@ Use **Actions → Configure SMTP**. The SDK's standard form offers Disabled (def
 
 For manual local backups, stop the service and copy the entire `data/` directory, including SQLite sidecar files. Restore it before starting again. Do not run two service processes against the same database.
 
+### Update schedule
+
+Settings provides Check every (1–24 whole hours), Starting at, Timezone, and the next scheduled check. Defaults are every 3 hours starting at 00:00 in Europe/London. Slots reset at the chosen start time each day: every 5 hours from 02:00 runs at 02:00, 07:00, 12:00, 17:00, and 22:00. Clock times follow the selected timezone; nonexistent daylight-saving times are skipped and repeated times run once. Checks start within the scheduler's 30-second tick.
+
+Manual refresh and initial imports do not move the scheduled slots. Failed repositories retry after their backoff without rechecking successful repositories. After downtime, one catch-up poll covers missed slots. Saving a changed schedule chooses its next future slot, and a poll already in progress finishes normally. On upgrade, existing mailboxes initialize to the next future default slot; subscriptions and notification preferences are preserved.
+
 ### Operations and troubleshooting
 
 An optional GitHub token in Settings raises API limits; only public repositories are accepted. Drafts and standalone Git tags are excluded. Deleted upstream releases remain in local history. Unsubscribing removes that repository's local history. Already queued summaries retain their contents and recipient.
 
-Each completed poll queues one email and one Nostr DM for the enabled channels, containing all newly matching releases grouped by repository, newest first within each group. Each channel respects the subscription's release-type and channel preferences. Empty summaries are not sent. Successful repositories are included even if another repository cannot be checked. Detections and summaries commit together; recipients and preferences are captured when the poll starts. Previously queued individual notifications keep their original format.
+Each completed poll queues one email and one Nostr DM for the enabled channels, containing all newly matching releases grouped by repository, newest first within each group. Each channel respects the subscription's release-type and channel preferences. Empty summaries are not sent. Successful repositories are included even if another repository cannot be checked. Detections and summaries commit together; recipients and preferences are captured when the poll starts. Email and DM bodies use “New releases from your watch list” followed by one bullet per release: repository, tag, and publication time in Europe/London, formatted as HH:mm:ss D/M/YYYY. Notes, titles, URLs, and poll timestamps are omitted. Already encrypted Nostr retries retain their original event and contents.
 
 Email and Nostr jobs are independent. Transient failures retry with exponential backoff, eventually becoming Failed; recent jobs show a Retry button. Disabled channels pause pending jobs. Changing recipients affects new jobs; already queued jobs retain their original recipient. Enabling a channel does not replay release history. Accepted means SMTP or at least one inbox relay accepted the message, not that the recipient read it. SMTP retries after ambiguous failures can produce duplicates; stable Message-IDs help recipients deduplicate.
 

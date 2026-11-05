@@ -6,6 +6,7 @@ import { type Db, getMeta, setMeta, settings, senderNpub, hashPassword, checkPas
 import { GitHub } from './github.js';
 import { Poller } from './poller.js';
 import { Notifications, recipientKey, validRelay, smtpConfig } from './notifications.js';
+import { validTimezone } from './schedule.js';
 
 export function createApp(db: Db) {
   const app = express(); app.disable('x-powered-by');
@@ -57,7 +58,7 @@ export function createApp(db: Db) {
     const input = subscription.extend({ repository: z.string().max(250) }).parse(req.body);
     const repo = await github.repository(input.repository);
     const result = db.prepare('INSERT INTO subscriptions(github_id,full_name,category_id,stable,prerelease,email,nostr) VALUES (?,?,?,?,?,?,?)').run(repo.id, repo.full_name, input.category_id, +input.stable, +input.prerelease, +input.email, +input.nostr);
-    changed(); void poller.poll().then(() => notifications.run()); res.json({ id: result.lastInsertRowid });
+    changed(); void poller.poll(false, Number(result.lastInsertRowid)).then(() => notifications.run()).catch(() => changed()); res.json({ id: result.lastInsertRowid });
   });
   app.patch('/api/subscriptions/:id', (req, res) => { const input = subscription.parse(req.body); db.prepare('UPDATE subscriptions SET category_id=?,stable=?,prerelease=?,email=?,nostr=? WHERE id=?').run(input.category_id, +input.stable, +input.prerelease, +input.email, +input.nostr, Number(req.params.id)); changed(); res.json({ ok: true }); });
   app.delete('/api/subscriptions/:id', (req, res) => { db.prepare('DELETE FROM subscriptions WHERE id=?').run(Number(req.params.id)); changed(); res.json({ ok: true }); });
@@ -67,19 +68,22 @@ export function createApp(db: Db) {
   });
   app.patch('/api/releases/:id', (req, res) => { const { unread } = z.object({ unread: z.boolean() }).parse(req.body); db.prepare('UPDATE releases SET unread=? WHERE id=?').run(+unread, Number(req.params.id)); changed(); res.json({ ok: true }); });
   app.post('/api/read-all', (req, res) => { const { subscriptionId } = z.object({ subscriptionId: z.number().int().nonnegative().default(0) }).parse(req.body); db.prepare('UPDATE releases SET unread=0 WHERE (?=0 OR subscription_id=?)').run(subscriptionId, subscriptionId); changed(); res.json({ ok: true }); });
-  app.post('/api/refresh', (_req, res) => { if (process.env.DEMO_MODE !== 'true') void poller.poll(true).then(() => notifications.run()); res.json({ ok: true }); });
+  app.post('/api/refresh', (_req, res) => { if (process.env.DEMO_MODE !== 'true') void poller.poll(true).then(() => notifications.run()).catch(() => changed()); res.json({ ok: true }); });
   app.get('/api/releases/:id', (req, res) => { const release = db.prepare('SELECT r.*,s.full_name FROM releases r JOIN subscriptions s ON s.id=r.subscription_id WHERE r.id=?').get(Number(req.params.id)); if (!release) { res.status(404).json({ error: 'Release not found.' }); return; } res.json(release); });
-  app.get('/api/settings', (_req, res) => { const config = settings(db); res.json({ ...config, githubToken: '', githubTokenSet: !!config.githubToken, senderNpub: senderNpub(db), smtpReady: !!smtpConfig() }); });
+  app.get('/api/settings', (_req, res) => { const config = settings(db); res.json({ ...config, nextScheduledCheck: new Date(poller.schedule().nextCheck).toISOString(), githubToken: '', githubTokenSet: !!config.githubToken, senderNpub: senderNpub(db), smtpReady: !!smtpConfig() }); });
   app.put('/api/settings', (req, res) => {
-    const config = z.object({ githubToken: z.string().max(255).optional(), clearGithubToken: z.boolean().optional(), emailEnabled: z.boolean(), emailRecipient: z.union([z.email(), z.literal('')]), nostrEnabled: z.boolean(), nostrRecipient: z.string().max(100), discoveryRelays: z.array(z.string().refine(validRelay, 'Use secure wss:// relay URLs.')).min(1).max(10) }).parse(req.body);
+    const config = z.object({ githubToken: z.string().max(255).optional(), clearGithubToken: z.boolean().optional(), emailEnabled: z.boolean(), emailRecipient: z.union([z.email(), z.literal('')]), nostrEnabled: z.boolean(), nostrRecipient: z.string().max(100), discoveryRelays: z.array(z.string().refine(validRelay, 'Use secure wss:// relay URLs.')).min(1).max(10), checkEveryHours: z.number().int().min(1).max(24).optional(), checkStartTime: z.string().regex(/^([01]\d|2[0-3]):[0-5]\d$/, 'Enter a start time in HH:MM format.').optional(), checkTimezone: z.string().trim().min(1).max(100).refine(validTimezone, 'Enter a valid timezone.').optional() }).parse(req.body);
     if (config.nostrRecipient) recipientKey(config.nostrRecipient);
     if (config.emailEnabled && !config.emailRecipient) throw new Error('Enter a recipient email address.');
     if (config.nostrEnabled && !config.nostrRecipient) throw new Error('Enter a recipient npub.');
     const previous = settings(db);
     const { githubToken, clearGithubToken, ...preferences } = config;
     const token = clearGithubToken ? '' : githubToken || previous.githubToken;
-    setMeta(db, 'settings', JSON.stringify({ ...previous, ...preferences, clearGithubToken: false, githubToken: token }));
-    if (token !== previous.githubToken) { setMeta(db, 'github_pause', '0'); setMeta(db, 'github_backoff', '0'); }
+    db.transaction(() => {
+      setMeta(db, 'settings', JSON.stringify({ ...previous, ...preferences, clearGithubToken: false, githubToken: token }));
+      poller.schedule();
+      if (token !== previous.githubToken) { setMeta(db, 'github_pause', '0'); setMeta(db, 'github_backoff', '0'); }
+    })();
     changed(); res.json({ ok: true });
   });
   app.get('/api/jobs', (_req, res) => res.json(db.prepare('SELECT id,channel,recipient,state,attempts,error,created_at FROM jobs ORDER BY id DESC LIMIT 100').all()));

@@ -33,23 +33,23 @@ export function groupedReleases(payload: DigestPayload): [string, ReleasePayload
   for (const release of payload.releases) { const list = groups.get(release.repository) || []; list.push(release); groups.set(release.repository, list); }
   return [...groups].sort(([a], [b]) => a.localeCompare(b, 'en')).map(([repository, releases]) => [repository, releases.sort((a, b) => b.publishedAt.localeCompare(a.publishedAt) || a.tag.localeCompare(b.tag, 'en'))]);
 }
-function releaseText(p: ReleasePayload) { return `${p.title} (${p.tag})\n${p.prerelease ? 'Pre-release' : 'Release'} · ${p.publishedAt}\n\n${p.excerpt}\n\n${p.url}`; }
+const notificationHeading = 'New releases from your watch list';
+const releaseDate = new Intl.DateTimeFormat('en-GB', { timeZone: 'Europe/London', hourCycle: 'h23', hour: '2-digit', minute: '2-digit', second: '2-digit', day: 'numeric', month: 'numeric', year: 'numeric' });
+function releaseLine(p: ReleasePayload) {
+  const date = new Date(p.publishedAt);
+  const parts = Object.fromEntries(releaseDate.formatToParts(date).map(part => [part.type, part.value]));
+  return `${p.repository} ${p.tag} available ${parts.hour}:${parts.minute}:${parts.second} ${Number(parts.day)}/${Number(parts.month)}/${parts.year}`;
+}
+function notificationReleases(p: Payload) { return 'releases' in p ? groupedReleases(p).flatMap(([, releases]) => releases) : [p]; }
 export function messageText(p: Payload): string {
-  if (!('releases' in p)) return `${p.repository}\n${releaseText(p)}`;
-  return `GitHub releases\nPoll completed: ${p.polledAt}\n\n${groupedReleases(p).map(([repository, releases]) => `${repository}\n${'='.repeat(repository.length)}\n\n${releases.map(releaseText).join('\n\n---\n\n')}`).join('\n\n\n')}`;
+  return `${notificationHeading}\n\n${notificationReleases(p).map(release => `- ${releaseLine(release)}`).join('\n')}`;
 }
-function releaseHtml(p: ReleasePayload) { return `<h3>${escapeHtml(p.title)}</h3><p>${escapeHtml(p.tag)} · ${p.prerelease ? 'Pre-release' : 'Release'} · ${escapeHtml(p.publishedAt)}</p><p style="white-space:pre-wrap">${escapeHtml(p.excerpt)}</p><p>${escapeHtml(p.url)}</p>`; }
 export function messageHtml(p: Payload): string {
-  const content = 'releases' in p ? `<h1>GitHub releases</h1><p>Poll completed: ${escapeHtml(p.polledAt)}</p>${groupedReleases(p).map(([repository, releases]) => `<section><h2>${escapeHtml(repository)}</h2>${releases.map(releaseHtml).join('<hr>')}</section>`).join('')}` : `<h2>${escapeHtml(p.repository)}</h2>${releaseHtml(p)}`;
-  return `<div style="font:16px/1.6 system-ui,sans-serif">${content}</div>`;
+  return `<div style="font:16px/1.6 system-ui,sans-serif"><p>${notificationHeading}</p><ul>${notificationReleases(p).map(release => `<li>${escapeHtml(releaseLine(release))}</li>`).join('')}</ul></div>`;
 }
-export function messageSubject(p: Payload) {
-  if (!('releases' in p)) return `[${p.repository}] ${p.title}`.replace(/[\r\n]/g, ' ');
-  const repositories = new Set(p.releases.map(r => r.repository)).size;
-  return `[Release Mailbox] ${p.releases.length} release${p.releases.length === 1 ? '' : 's'} in ${repositories} repositor${repositories === 1 ? 'y' : 'ies'}`;
-}
+export function messageSubject(_p: Payload) { return notificationHeading; }
 export async function sendEmail(config: Smtp, recipient: string, messageId: string, payload: Payload) {
-  const transport = nodemailer.createTransport({ host: config.host, port: config.port, secure: config.security === 'tls', requireTLS: config.security === 'starttls', ignoreTLS: config.security === 'plain', auth: config.username ? { user: config.username, pass: config.password || '' } : undefined, connectionTimeout: 15_000, greetingTimeout: 15_000, socketTimeout: 30_000 });
+  const transport = nodemailer.createTransport({ name: 'release-mailbox.local', host: config.host, port: config.port, secure: config.security === 'tls', requireTLS: config.security === 'starttls', ignoreTLS: config.security === 'plain', auth: config.username ? { user: config.username, pass: config.password || '' } : undefined, connectionTimeout: 15_000, greetingTimeout: 15_000, socketTimeout: 30_000 });
   try { await transport.sendMail({ from: config.from, to: recipient, subject: messageSubject(payload), messageId: `<${messageId}>`, text: messageText(payload), html: messageHtml(payload) }); } finally { transport.close(); }
 }
 export function recipientKey(npub: string) { try { const decoded = nip19.decode(npub); if (decoded.type === 'npub') return decoded.data; } catch {} throw new Error('Enter a valid recipient npub.'); }

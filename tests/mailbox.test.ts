@@ -1,6 +1,6 @@
 import { describe, it, expect, afterEach, vi } from 'vitest';
 import { openDb, settings, setMeta, hashPassword, checkPassword, senderSecret } from '../server/db.js';
-import { ingest, Poller, INTERVAL } from '../server/poller.js';
+import { ingest, Poller } from '../server/poller.js';
 import { GitHub, parseRepository } from '../server/github.js';
 import { createApp } from '../server/app.js';
 import { wrapMessage, sendEmail, Notifications, smtpConfig, type Job } from '../server/notifications.js';
@@ -53,14 +53,14 @@ describe('mailbox detection', () => {
     ingest(db, db.prepare('SELECT * FROM subscriptions').get() as Subscription, [release(1)]); db.prepare('UPDATE releases SET unread=0').run(); db.prepare('UPDATE subscriptions SET next_check=0').run(); db.close();
     db = openDb(`${dir}/mailbox.sqlite`); resources.push(() => { db.close(); });
     const github = { releases: vi.fn(async () => [release(1), release(2)]) } as unknown as GitHub;
-    const poller = new Poller(db, github); await Promise.all([poller.poll(), poller.poll()]);
+    const poller = new Poller(db, github); setMeta(db, 'poll_schedule', JSON.stringify({ ...poller.schedule(), nextCheck: Date.now() - 1 })); await Promise.all([poller.poll(), poller.poll()]);
     expect(github.releases).toHaveBeenCalledTimes(1);
     expect(db.prepare('SELECT github_id,unread FROM releases ORDER BY github_id').all()).toEqual([{ github_id: 1, unread: 0 }, { github_id: 2, unread: 1 }]);
-    expect((db.prepare('SELECT next_check FROM subscriptions').get() as any).next_check).toBeGreaterThan(Date.now() + INTERVAL - 1000);
+    expect(poller.schedule().nextCheck).toBeGreaterThan(Date.now()); expect((db.prepare('SELECT next_check FROM subscriptions').get() as any).next_check).toBe(0);
   });
   it('retains data and read state after a failed poll', async () => {
     const { db, sub } = fixture(); ingest(db, sub(), [release(1)]); db.prepare('UPDATE subscriptions SET next_check=0').run();
-    await new Poller(db, { releases: async () => { throw new Error('Network offline'); } } as unknown as GitHub).poll();
+    await new Poller(db, { releases: async () => { throw new Error('Network offline'); } } as unknown as GitHub).poll(true);
     expect((db.prepare('SELECT error FROM subscriptions').get() as any).error).toBe('Network offline');
     expect(db.prepare('SELECT count(*) n FROM releases').get()).toEqual({ n: 1 });
   });
@@ -79,6 +79,28 @@ describe('GitHub requests', () => {
   it('honors rate-limit backoff without discarding its cache', async () => {
     const { db } = fixture(); const request = vi.fn(async () => new Response('{}', { status: 429, headers: { 'retry-after': '120' } })) as unknown as typeof fetch;
     const github = new GitHub(db, request); await expect(github.repository('example/project')).rejects.toThrow('rate limit'); await expect(github.repository('example/project')).rejects.toThrow('rate limit'); expect(request).toHaveBeenCalledTimes(1);
+  });
+  it('does not pause unrelated requests when an organization rejects a token lifetime', async () => {
+    const { db } = fixture();
+    const request = vi.fn().mockResolvedValueOnce(new Response(JSON.stringify({ message: "The organization forbids access via fine-grained personal access tokens if the token's lifetime is greater than 366 days." }), { status: 403, headers: { 'x-ratelimit-remaining': '4994', 'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 3600) } })).mockResolvedValueOnce(new Response(JSON.stringify({ id: 2, full_name: 'other/project', private: false })));
+    const github = new GitHub(db, request);
+    await expect(github.repository('lnbits/lnbits')).rejects.toThrow('token lifetime');
+    await expect(github.repository('other/project')).resolves.toMatchObject({ id: 2 });
+    expect(request).toHaveBeenCalledTimes(2);
+  });
+  it('uses the primary reset only when the primary quota is exhausted', async () => {
+    const { db } = fixture(); const reset = Math.floor(Date.now() / 1000) + 3600;
+    const request = vi.fn(async () => new Response('{}', { status: 403, headers: { 'x-ratelimit-remaining': '0', 'x-ratelimit-reset': String(reset) } }));
+    const github = new GitHub(db, request);
+    await expect(github.repository('example/project')).rejects.toMatchObject({ retryAt: reset * 1000 });
+    await expect(github.repository('example/project')).rejects.toThrow('Retry after'); expect(request).toHaveBeenCalledTimes(1);
+  });
+  it('backs off briefly for secondary limits without waiting for the unrelated primary reset', async () => {
+    const { db } = fixture(); const started = Date.now();
+    const request = vi.fn(async () => new Response(JSON.stringify({ message: 'You have exceeded a secondary rate limit.' }), { status: 403, headers: { 'x-ratelimit-remaining': '4994', 'x-ratelimit-reset': String(Math.floor(Date.now() / 1000) + 3600) } }));
+    await expect(new GitHub(db, request).repository('example/project')).rejects.toMatchObject({ retryAt: expect.any(Number) });
+    const pause = Number((db.prepare("SELECT value FROM meta WHERE key='github_pause'").get() as any).value);
+    expect(pause).toBeGreaterThanOrEqual(started + 60_000); expect(pause).toBeLessThan(started + 65_000);
   });
 });
 
@@ -99,7 +121,7 @@ describe('notification delivery', () => {
     await new Promise<void>(resolve => server.listen(0, '127.0.0.1', resolve)); resources.push(() => new Promise<void>(resolve => server.close(resolve)));
     const port = (server.server.address() as any).port;
     await sendEmail({ host: '127.0.0.1', port, from: 'mailbox@example.com', security: 'plain' }, 'recipient@example.com', 'stable-id@example.com', payload);
-    expect(received).toContain('Message-ID: <stable-id@example.com>'); expect(received).toContain('text/plain'); expect(received).toContain('text/html'); expect(received).toContain('&lt;script&gt;'); expect(received.split('Content-Type: text/html')[1]).not.toContain('<script>');
+    expect(received).toContain('Message-ID: <stable-id@example.com>'); expect(received).toContain('text/plain'); expect(received).toContain('text/html'); expect(received).not.toContain('Notes'); expect(received).not.toContain('alert(1)'); expect(received.split('Content-Type: text/html')[1]).not.toContain('<script>');
   });
   it('keeps channels independent and retains retryable failures without leaking provider errors', async () => {
     const { db, sub } = fixture(); setMeta(db, 'settings', JSON.stringify({ ...settings(db), emailEnabled: true, emailRecipient: 'a@example.com', nostrEnabled: true, nostrRecipient: 'npub-test' })); ingest(db, sub(), [release(1)]);
@@ -205,6 +227,15 @@ describe('HTTP authentication and mailbox actions', () => {
     expect(settings(db).githubToken).toBe('');
     await fetch(`${base}/api/settings`, { method: 'PUT', headers, body: JSON.stringify({ ...config, clearGithubToken: false, githubToken: 'new-token' }) });
     expect(settings(db).githubToken).toBe('new-token');
+    for (const invalid of [{ checkEveryHours: 0 }, { checkEveryHours: 25 }, { checkEveryHours: 1.5 }, { checkStartTime: '24:00' }, { checkTimezone: 'Invalid/Zone' }]) {
+      expect((await fetch(`${base}/api/settings`, { method: 'PUT', headers, body: JSON.stringify({ ...config, ...invalid }) })).status).toBe(400);
+    }
+    await fetch(`${base}/api/settings`, { method: 'PUT', headers, body: JSON.stringify({ ...config, githubToken: '', checkEveryHours: 5, checkStartTime: '02:00', checkTimezone: 'Europe/London' }) });
+    const scheduled = await (await fetch(`${base}/api/settings`, { headers })).json();
+    expect(scheduled).toMatchObject({ checkEveryHours: 5, checkStartTime: '02:00', checkTimezone: 'Europe/London' });
+    expect(Date.parse(scheduled.nextScheduledCheck)).toBeGreaterThan(Date.now());
+    expect(settings(db).githubToken).toBe('new-token');
+
     await fetch(`${base}/api/logout`, { method: 'POST', headers }); expect((await fetch(`${base}/api/mailbox`, { headers })).status).toBe(401);
     expect(checkPassword('wrong-password', hashPassword('correct-password'))).toBe(false);
   });

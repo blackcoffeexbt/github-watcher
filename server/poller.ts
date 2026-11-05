@@ -1,10 +1,10 @@
 import { randomUUID } from 'node:crypto';
-import { type Db, settings } from './db.js';
+import { type Db, settings, getMeta, setMeta } from './db.js';
 import { GitHub, GitHubError } from './github.js';
 import type { GitHubRelease, Release, Subscription, Settings } from './types.js';
 import type { ReleasePayload, DigestPayload } from './notifications.js';
+import { nextScheduledCheck, scheduleSignature } from './schedule.js';
 
-export const INTERVAL = 3 * 3600_000;
 export function notificationPayload(sub: Subscription, release: GitHubRelease) {
   return { repository: sub.full_name, title: release.name || release.tag_name, tag: release.tag_name, prerelease: release.prerelease, publishedAt: release.published_at, excerpt: (release.body || '').replace(/<[^>]*>/g, '').slice(0, 600), url: release.html_url };
 }
@@ -39,23 +39,35 @@ export function ingest(db: Db, sub: Subscription, releases: GitHubRelease[], bat
         }
       }
     }
-    db.prepare('UPDATE subscriptions SET initialized=1,last_checked=?,next_check=?,error=NULL WHERE id=?').run(new Date().toISOString(), Date.now() + INTERVAL, sub.id);
+    db.prepare('UPDATE subscriptions SET initialized=1,last_checked=?,next_check=0,error=NULL WHERE id=?').run(new Date().toISOString(), sub.id);
     if (!batch) enqueueBatch(db, target);
   })();
 }
 export class Poller {
   busy = false;
-  constructor(private db: Db, private github = new GitHub(db), private changed = () => {}) {}
-  async poll(force = false) {
+  constructor(private db: Db, private github = new GitHub(db), private changed = () => {}) { this.schedule(); }
+  schedule() {
+    const config = settings(this.db); const signature = scheduleSignature(config);
+    const stored = getMeta(this.db, 'poll_schedule');
+    const previous = stored ? JSON.parse(stored) as { signature: string; nextCheck: number } : null;
+    if (previous?.signature === signature) return previous;
+    const next = { signature, nextCheck: nextScheduledCheck(config) };
+    setMeta(this.db, 'poll_schedule', JSON.stringify(next)); return next;
+  }
+  async poll(force = false, subscriptionId?: number) {
     if (this.busy) return;
     this.busy = true;
     try {
       const batch = newBatch(this.db);
+      const schedule = this.schedule();
+      const scheduled = !force && subscriptionId === undefined && schedule.nextCheck <= Date.now();
+      if (Number(getMeta(this.db, 'github_pause') || 0) > Date.now()) return;
       const fetched: { sub: Subscription; releases: GitHubRelease[] }[] = [];
-      const subs = this.db.prepare('SELECT * FROM subscriptions WHERE next_check<=? ORDER BY id').all(force ? Number.MAX_SAFE_INTEGER : Date.now()) as Subscription[];
+      const subs = (this.db.prepare('SELECT * FROM subscriptions ORDER BY id').all() as Subscription[]).filter(sub => subscriptionId !== undefined ? sub.id === subscriptionId && sub.next_check <= Date.now() : force || ((scheduled || !sub.initialized || !!sub.error) && ((!sub.error && !!sub.initialized) || sub.next_check <= Date.now())));
+      if (!subs.length && !scheduled) return;
       for (const sub of subs) {
         try { fetched.push({ sub, releases: await this.github.releases(sub) }); }
-        catch (error) { this.db.prepare('UPDATE subscriptions SET error=?,next_check=? WHERE id=?').run(error instanceof Error ? error.message : 'Update failed.', error instanceof GitHubError ? error.retryAt : Date.now() + INTERVAL, sub.id); }
+        catch (error) { this.db.prepare('UPDATE subscriptions SET error=?,next_check=? WHERE id=?').run(error instanceof Error ? error.message : 'Update failed.', error instanceof GitHubError ? error.retryAt : Date.now() + batch.config.checkEveryHours * 3600_000, sub.id); }
       }
       // Fetch before opening the transaction: no partial poll can be delivered,
       // and a crash before commit leaves releases due for the next run.
@@ -64,6 +76,10 @@ export class Poller {
           if (this.db.prepare('SELECT 1 FROM subscriptions WHERE id=?').get(sub.id)) ingest(this.db, sub, releases, batch);
         }
         enqueueBatch(this.db, batch);
+        const current = this.schedule();
+        if (scheduled && current.signature === schedule.signature && current.nextCheck === schedule.nextCheck) {
+          setMeta(this.db, 'poll_schedule', JSON.stringify({ ...current, nextCheck: nextScheduledCheck(settings(this.db)) }));
+        }
       })();
       this.changed();
     } finally { this.busy = false; }
